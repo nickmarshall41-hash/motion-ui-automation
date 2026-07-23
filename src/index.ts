@@ -1,14 +1,21 @@
-import { connect, launch } from "@cloudflare/playwright";
+import {
+  launch,
+  type BrowserContextOptions,
+  type BrowserWorker,
+} from "@cloudflare/playwright";
 
 interface Env {
-  MYBROWSER: Fetcher;
+  MYBROWSER: BrowserWorker;
   SESSION_KV: KVNamespace;
   AUTOMATION_TOKEN: string;
 }
 
 const MOTION_URL = "https://app.usemotion.com/";
+
 const STORAGE_STATE_KEY = "motion:storage-state";
-const ACTIVE_SESSION_KEY = "motion:active-session";
+const ACTIVE_ATTEMPT_KEY = "motion:active-login-attempt";
+const CONFIRM_PREFIX = "motion:login-confirmed:";
+const CANCEL_PREFIX = "motion:login-cancelled:";
 
 const CORS_HEADERS: Record<string, string> = {
   "Access-Control-Allow-Origin": "*",
@@ -43,7 +50,7 @@ export default {
         return jsonResponse({
           ok: true,
           service: "motion-ui-automation",
-          version: "1.0.0",
+          version: "2.0.0",
           browserBinding: Boolean(env.MYBROWSER),
           kvBinding: Boolean(env.SESSION_KV),
           automationTokenConfigured: Boolean(env.AUTOMATION_TOKEN),
@@ -60,12 +67,16 @@ export default {
         return getSessionStatus(env);
       }
 
-      if (request.method === "POST" && path === "/session/start") {
-        return startLoginSession(env);
+      if (request.method === "POST" && path === "/session/login") {
+        return runInteractiveLogin(env);
       }
 
-      if (request.method === "POST" && path === "/session/save") {
-        return saveLoginSession(env);
+      if (request.method === "POST" && path === "/session/confirm") {
+        return confirmInteractiveLogin(env);
+      }
+
+      if (request.method === "POST" && path === "/session/cancel") {
+        return cancelInteractiveLogin(env);
       }
 
       if (request.method === "POST" && path === "/session/test") {
@@ -90,7 +101,10 @@ export default {
         {
           ok: false,
           error: "Unhandled Worker error.",
-          details: error instanceof Error ? error.message : String(error),
+          details:
+            error instanceof Error
+              ? error.message
+              : String(error),
         },
         500,
       );
@@ -98,112 +112,203 @@ export default {
   },
 };
 
-async function startLoginSession(env: Env): Promise<Response> {
-  const savedStateJson = await env.SESSION_KV.get(STORAGE_STATE_KEY);
+async function runInteractiveLogin(
+  env: Env,
+): Promise<Response> {
+  const existingAttempt =
+    await env.SESSION_KV.get(ACTIVE_ATTEMPT_KEY);
+
+  if (existingAttempt) {
+    return jsonResponse(
+      {
+        ok: false,
+        error: "A Motion login attempt is already active.",
+        attemptId: existingAttempt,
+        nextAction:
+          "Finish or cancel the existing attempt first.",
+      },
+      409,
+    );
+  }
+
+  const attemptId = crypto.randomUUID();
+  const confirmKey = `${CONFIRM_PREFIX}${attemptId}`;
+  const cancelKey = `${CANCEL_PREFIX}${attemptId}`;
+
+  await env.SESSION_KV.put(
+    ACTIVE_ATTEMPT_KEY,
+    attemptId,
+    {
+      expirationTtl: 15 * 60,
+    },
+  );
+
+  const savedStateJson =
+    await env.SESSION_KV.get(STORAGE_STATE_KEY);
 
   const savedState = savedStateJson
-    ? JSON.parse(savedStateJson)
+    ? (JSON.parse(savedStateJson) as
+        BrowserContextOptions["storageState"])
     : undefined;
 
   const browser = await launch(env.MYBROWSER, {
     keep_alive: 600_000,
   });
 
-  const context = await browser.newContext({
-    storageState: savedState,
-    viewport: {
-      width: 1440,
-      height: 1000,
-    },
-  });
+  try {
+    const context = await browser.newContext({
+      storageState: savedState,
+      viewport: {
+        width: 1440,
+        height: 1000,
+      },
+    });
 
-  const page = await context.newPage();
+    const page = await context.newPage();
 
-  await page.goto(MOTION_URL, {
-    waitUntil: "domcontentloaded",
-    timeout: 60_000,
-  });
+    await page.goto(MOTION_URL, {
+      waitUntil: "domcontentloaded",
+      timeout: 60_000,
+    });
 
-  const sessionId = browser.sessionId();
+    const sessionId = browser.sessionId();
+    const startTime = Date.now();
+    const maximumWait = 9 * 60 * 1000;
 
-  await env.SESSION_KV.put(ACTIVE_SESSION_KEY, sessionId, {
-    expirationTtl: 15 * 60,
-  });
+    while (Date.now() - startTime < maximumWait) {
+      const [confirmed, cancelled] =
+        await Promise.all([
+          env.SESSION_KV.get(confirmKey),
+          env.SESSION_KV.get(cancelKey),
+        ]);
 
-  // Do not close the browser. It must remain available under
-  // Cloudflare Browser Run > Live Sessions for manual login.
-  return jsonResponse({
-    ok: true,
-    sessionId,
-    currentUrl: page.url(),
-    nextAction:
-      "Open Cloudflare Browser Run > Live Sessions, open this session, sign in to Motion, then return to the setup page and click Save signed-in session.",
-  });
-}
+      if (cancelled) {
+        return jsonResponse({
+          ok: false,
+          cancelled: true,
+          sessionId,
+          message:
+            "The interactive Motion login was cancelled.",
+        });
+      }
 
-async function saveLoginSession(env: Env): Promise<Response> {
-  const sessionId = await env.SESSION_KV.get(ACTIVE_SESSION_KEY);
+      if (confirmed) {
+        await page.waitForTimeout(2_000);
 
-  if (!sessionId) {
+        const storageState =
+          await context.storageState({
+            indexedDB: true,
+          });
+
+        await env.SESSION_KV.put(
+          STORAGE_STATE_KEY,
+          JSON.stringify(storageState),
+        );
+
+        return jsonResponse({
+          ok: true,
+          saved: true,
+          attemptId,
+          sessionId,
+          currentUrl: page.url(),
+          pageTitle: await safePageTitle(page),
+          nextAction: "Click Test saved session.",
+        });
+      }
+
+      await sleep(1_000);
+    }
+
     return jsonResponse(
       {
         ok: false,
-        error: "No active login session was found.",
-        nextAction: "Start a new Motion login session first.",
+        error:
+          "The login attempt timed out before confirmation.",
+        sessionId,
+        nextAction:
+          "Start another attempt and complete it within nine minutes.",
+      },
+      408,
+    );
+  } finally {
+    await Promise.all([
+      env.SESSION_KV.delete(ACTIVE_ATTEMPT_KEY),
+      env.SESSION_KV.delete(confirmKey),
+      env.SESSION_KV.delete(cancelKey),
+    ]);
+
+    await browser.close();
+  }
+}
+
+async function confirmInteractiveLogin(
+  env: Env,
+): Promise<Response> {
+  const attemptId =
+    await env.SESSION_KV.get(ACTIVE_ATTEMPT_KEY);
+
+  if (!attemptId) {
+    return jsonResponse(
+      {
+        ok: false,
+        error: "No active Motion login attempt exists.",
+        nextAction: "Click Start Motion login first.",
       },
       409,
     );
   }
 
-  const browser = await connect(env.MYBROWSER, sessionId);
+  await env.SESSION_KV.put(
+    `${CONFIRM_PREFIX}${attemptId}`,
+    "true",
+    {
+      expirationTtl: 10 * 60,
+    },
+  );
 
-  try {
-    const context = browser.contexts()[0];
-
-    if (!context) {
-      return jsonResponse(
-        {
-          ok: false,
-          error: "The browser session has no active context.",
-          nextAction: "Start a new Motion login session.",
-        },
-        409,
-      );
-    }
-
-    const page = context.pages()[0] ?? (await context.newPage());
-
-    const updatedState = await context.storageState({
-      indexedDB: true,
-    });
-
-    await env.SESSION_KV.put(
-      STORAGE_STATE_KEY,
-      JSON.stringify(updatedState),
-    );
-
-    await env.SESSION_KV.delete(ACTIVE_SESSION_KEY);
-
-    return jsonResponse({
-      ok: true,
-      saved: true,
-      sessionId,
-      currentUrl: page.url(),
-      pageTitle: await safePageTitle(page),
-      nextAction: "Click Test saved session.",
-    });
-  } finally {
-    /*
-     * This browser came from connect().
-     * In Cloudflare Playwright, close() disconnects this Worker request
-     * without destroying the underlying browser session.
-     */
-    await browser.close();
-  }
+  return jsonResponse({
+    ok: true,
+    confirmed: true,
+    attemptId,
+    message:
+      "Confirmation received. Keep this setup page open while the original login request saves the session.",
+  });
 }
 
-async function testSavedSession(env: Env): Promise<Response> {
-  const savedStateJson = await env.SESSION_KV.get(STORAGE_STATE_KEY);
+async function cancelInteractiveLogin(
+  env: Env,
+): Promise<Response> {
+  const attemptId =
+    await env.SESSION_KV.get(ACTIVE_ATTEMPT_KEY);
+
+  if (!attemptId) {
+    return jsonResponse({
+      ok: true,
+      cancelled: false,
+      message: "There is no active login attempt.",
+    });
+  }
+
+  await env.SESSION_KV.put(
+    `${CANCEL_PREFIX}${attemptId}`,
+    "true",
+    {
+      expirationTtl: 10 * 60,
+    },
+  );
+
+  return jsonResponse({
+    ok: true,
+    cancelled: true,
+    attemptId,
+  });
+}
+
+async function testSavedSession(
+  env: Env,
+): Promise<Response> {
+  const savedStateJson =
+    await env.SESSION_KV.get(STORAGE_STATE_KEY);
 
   if (!savedStateJson) {
     return jsonResponse(
@@ -211,7 +316,7 @@ async function testSavedSession(env: Env): Promise<Response> {
         ok: false,
         error: "No saved Motion browser state exists.",
         nextAction:
-          "Start a Motion login session, sign in, and save the session first.",
+          "Complete the interactive Motion login first.",
       },
       409,
     );
@@ -235,22 +340,41 @@ async function testSavedSession(env: Env): Promise<Response> {
       timeout: 60_000,
     });
 
-    await page.waitForTimeout(3_000);
+    await page.waitForTimeout(4_000);
 
     const currentUrl = page.url();
     const pageTitle = await safePageTitle(page);
 
+    const passwordVisible = await page
+      .locator('input[type="password"]')
+      .isVisible()
+      .catch(() => false);
+
+    const welcomeBackVisible = await page
+      .getByText("Welcome back!", {
+        exact: false,
+      })
+      .isVisible()
+      .catch(() => false);
+
     const likelySignedIn =
-      !/(login|sign-in|signin|authentication|auth)/i.test(currentUrl);
+      !passwordVisible &&
+      !welcomeBackVisible &&
+      !/(login|sign-in|signin|auth)/i.test(
+        currentUrl,
+      );
 
-    const refreshedState = await context.storageState({
-      indexedDB: true,
-    });
+    if (likelySignedIn) {
+      const refreshedState =
+        await context.storageState({
+          indexedDB: true,
+        });
 
-    await env.SESSION_KV.put(
-      STORAGE_STATE_KEY,
-      JSON.stringify(refreshedState),
-    );
+      await env.SESSION_KV.put(
+        STORAGE_STATE_KEY,
+        JSON.stringify(refreshedState),
+      );
+    }
 
     return jsonResponse({
       ok: true,
@@ -259,31 +383,51 @@ async function testSavedSession(env: Env): Promise<Response> {
       likelySignedIn,
       message: likelySignedIn
         ? "The saved Motion browser session appears to be signed in."
-        : "Motion redirected to authentication. Start a new login session and save it again.",
+        : "Motion appears to require authentication. Run the interactive login again.",
     });
   } finally {
     await browser.close();
   }
 }
 
-async function getSessionStatus(env: Env): Promise<Response> {
-  const [savedState, activeSessionId] = await Promise.all([
-    env.SESSION_KV.get(STORAGE_STATE_KEY),
-    env.SESSION_KV.get(ACTIVE_SESSION_KEY),
-  ]);
+async function getSessionStatus(
+  env: Env,
+): Promise<Response> {
+  const [savedState, activeAttemptId] =
+    await Promise.all([
+      env.SESSION_KV.get(STORAGE_STATE_KEY),
+      env.SESSION_KV.get(ACTIVE_ATTEMPT_KEY),
+    ]);
 
   return jsonResponse({
     ok: true,
     signedInStateSaved: Boolean(savedState),
-    activeSessionId: activeSessionId ?? null,
+    activeLoginAttemptId: activeAttemptId ?? null,
   });
 }
 
-async function clearSavedSession(env: Env): Promise<Response> {
-  await Promise.all([
-    env.SESSION_KV.delete(STORAGE_STATE_KEY),
-    env.SESSION_KV.delete(ACTIVE_SESSION_KEY),
-  ]);
+async function clearSavedSession(
+  env: Env,
+): Promise<Response> {
+  const attemptId =
+    await env.SESSION_KV.get(ACTIVE_ATTEMPT_KEY);
+
+  const keys = [
+    STORAGE_STATE_KEY,
+    ACTIVE_ATTEMPT_KEY,
+    "motion:active-session",
+  ];
+
+  if (attemptId) {
+    keys.push(
+      `${CONFIRM_PREFIX}${attemptId}`,
+      `${CANCEL_PREFIX}${attemptId}`,
+    );
+  }
+
+  await Promise.all(
+    keys.map((key) => env.SESSION_KV.delete(key)),
+  );
 
   return jsonResponse({
     ok: true,
@@ -291,26 +435,38 @@ async function clearSavedSession(env: Env): Promise<Response> {
   });
 }
 
-function authorize(request: Request, env: Env): Response | null {
+function authorize(
+  request: Request,
+  env: Env,
+): Response | null {
   if (!env.AUTOMATION_TOKEN) {
     return jsonResponse(
       {
         ok: false,
-        error: "AUTOMATION_TOKEN is not configured.",
+        error:
+          "AUTOMATION_TOKEN is not configured.",
       },
       500,
     );
   }
 
-  const authorization = request.headers.get("Authorization");
-  const alternateToken = request.headers.get("X-Automation-Token");
+  const authorization =
+    request.headers.get("Authorization");
+
+  const alternateToken =
+    request.headers.get("X-Automation-Token");
 
   const suppliedToken =
-    authorization?.toLowerCase().startsWith("bearer ")
+    authorization
+      ?.toLowerCase()
+      .startsWith("bearer ")
       ? authorization.slice(7).trim()
       : alternateToken?.trim();
 
-  if (!suppliedToken || suppliedToken !== env.AUTOMATION_TOKEN) {
+  if (
+    !suppliedToken ||
+    suppliedToken !== env.AUTOMATION_TOKEN
+  ) {
     return jsonResponse(
       {
         ok: false,
@@ -323,9 +479,11 @@ function authorize(request: Request, env: Env): Response | null {
   return null;
 }
 
-async function safePageTitle(page: {
-  title(): Promise<string>;
-}): Promise<string | null> {
+async function safePageTitle(
+  page: {
+    title(): Promise<string>;
+  },
+): Promise<string | null> {
   try {
     return await page.title();
   } catch {
@@ -333,7 +491,17 @@ async function safePageTitle(page: {
   }
 }
 
-function normalizePath(pathname: string): string {
+function sleep(
+  milliseconds: number,
+): Promise<void> {
+  return new Promise((resolve) =>
+    setTimeout(resolve, milliseconds),
+  );
+}
+
+function normalizePath(
+  pathname: string,
+): string {
   if (!pathname || pathname === "/") {
     return "/";
   }
@@ -343,23 +511,33 @@ function normalizePath(pathname: string): string {
     : pathname;
 }
 
-function jsonResponse(body: unknown, status = 200): Response {
-  return new Response(JSON.stringify(body, null, 2), {
-    status,
-    headers: {
-      ...CORS_HEADERS,
-      "Content-Type": "application/json; charset=utf-8",
-      "Cache-Control": "no-store",
-      "X-Content-Type-Options": "nosniff",
+function jsonResponse(
+  body: unknown,
+  status = 200,
+): Response {
+  return new Response(
+    JSON.stringify(body, null, 2),
+    {
+      status,
+      headers: {
+        ...CORS_HEADERS,
+        "Content-Type":
+          "application/json; charset=utf-8",
+        "Cache-Control": "no-store",
+        "X-Content-Type-Options": "nosniff",
+      },
     },
-  });
+  );
 }
 
-function htmlResponse(html: string): Response {
+function htmlResponse(
+  html: string,
+): Response {
   return new Response(html, {
     status: 200,
     headers: {
-      "Content-Type": "text/html; charset=utf-8",
+      "Content-Type":
+        "text/html; charset=utf-8",
       "Cache-Control": "no-store",
       "X-Content-Type-Options": "nosniff",
       "Referrer-Policy": "no-referrer",
@@ -372,9 +550,10 @@ function setupPage(): string {
 <html lang="en">
 <head>
   <meta charset="utf-8">
+
   <meta
     name="viewport"
-    content="width=device-width, initial-scale=1"
+    content="width=device-width,initial-scale=1"
   >
 
   <title>Motion UI Automation Setup</title>
@@ -382,7 +561,7 @@ function setupPage(): string {
   <style>
     body {
       font-family: system-ui, sans-serif;
-      max-width: 800px;
+      max-width: 820px;
       margin: 48px auto;
       padding: 0 20px;
       line-height: 1.45;
@@ -416,6 +595,12 @@ function setupPage(): string {
       padding: 12px;
       border-radius: 8px;
     }
+
+    .steps {
+      background: #eef6ff;
+      padding: 12px 18px 12px 36px;
+      border-radius: 8px;
+    }
   </style>
 </head>
 
@@ -423,9 +608,36 @@ function setupPage(): string {
   <h1>Motion UI Automation Setup</h1>
 
   <p class="warning">
-    Enter the Cloudflare <strong>AUTOMATION_TOKEN</strong> you created.
-    This page does not save the token.
+    Enter your Cloudflare
+    <strong>AUTOMATION_TOKEN</strong>.
+    This page does not save it.
   </p>
+
+  <ol class="steps">
+    <li>
+      Click <strong>Start Motion login</strong>.
+      The request will remain open.
+    </li>
+
+    <li>
+      Open Cloudflare Browser Run →
+      Live Sessions and sign in to Motion.
+    </li>
+
+    <li>
+      Return here and click
+      <strong>I am signed in — save session</strong>.
+    </li>
+
+    <li>
+      Wait for the Login result to say
+      <code>"saved": true</code>.
+    </li>
+
+    <li>
+      Click <strong>Test saved session</strong>.
+    </li>
+  </ol>
 
   <input
     id="token"
@@ -435,40 +647,126 @@ function setupPage(): string {
   >
 
   <div>
-    <button onclick="callApi('GET', '/session/status')">
-      Check status
+    <button onclick="startLogin()">
+      Start Motion login
     </button>
 
-    <button onclick="callApi('POST', '/session/start')">
-      Start Motion login session
+    <button
+      onclick="quickCall(
+        'POST',
+        '/session/confirm'
+      )"
+    >
+      I am signed in — save session
     </button>
 
-    <button onclick="callApi('POST', '/session/save')">
-      Save signed-in session
-    </button>
-
-    <button onclick="callApi('POST', '/session/test')">
+    <button
+      onclick="quickCall(
+        'POST',
+        '/session/test'
+      )"
+    >
       Test saved session
     </button>
 
-    <button onclick="callApi('DELETE', '/session')">
+    <button
+      onclick="quickCall(
+        'GET',
+        '/session/status'
+      )"
+    >
+      Check status
+    </button>
+
+    <button
+      onclick="quickCall(
+        'POST',
+        '/session/cancel'
+      )"
+    >
+      Cancel login
+    </button>
+
+    <button
+      onclick="quickCall(
+        'DELETE',
+        '/session'
+      )"
+    >
       Clear saved session
     </button>
   </div>
 
-  <h2>Result</h2>
+  <h2>Login result</h2>
+  <pre id="loginResult">Not started.</pre>
 
-  <pre id="result">Ready.</pre>
+  <h2>Action result</h2>
+  <pre id="actionResult">Ready.</pre>
 
   <script>
-    async function callApi(method, path) {
-      const token =
-        document.getElementById("token").value;
+    function getToken() {
+      return document
+        .getElementById("token")
+        .value;
+    }
 
+    function getHeaders() {
+      return {
+        Authorization:
+          "Bearer " + getToken(),
+
+        "Content-Type":
+          "application/json"
+      };
+    }
+
+    async function startLogin() {
       const result =
-        document.getElementById("result");
+        document.getElementById(
+          "loginResult"
+        );
 
-      if (!token) {
+      if (!getToken()) {
+        result.textContent =
+          "Enter AUTOMATION_TOKEN first.";
+
+        return;
+      }
+
+      result.textContent =
+        "The login browser is starting. " +
+        "Open Cloudflare Browser Run → " +
+        "Live Sessions, sign in, then " +
+        "return here and click I am " +
+        "signed in — save session.";
+
+      try {
+        const response = await fetch(
+          "/session/login",
+          {
+            method: "POST",
+            headers: getHeaders()
+          }
+        );
+
+        result.textContent =
+          await response.text();
+      } catch (error) {
+        result.textContent =
+          String(error);
+      }
+    }
+
+    async function quickCall(
+      method,
+      path
+    ) {
+      const result =
+        document.getElementById(
+          "actionResult"
+        );
+
+      if (!getToken()) {
         result.textContent =
           "Enter AUTOMATION_TOKEN first.";
 
@@ -478,18 +776,19 @@ function setupPage(): string {
       result.textContent = "Working...";
 
       try {
-        const response = await fetch(path, {
-          method,
-          headers: {
-            Authorization: "Bearer " + token,
-            "Content-Type": "application/json"
+        const response = await fetch(
+          path,
+          {
+            method,
+            headers: getHeaders()
           }
-        });
+        );
 
         result.textContent =
           await response.text();
       } catch (error) {
-        result.textContent = String(error);
+        result.textContent =
+          String(error);
       }
     }
   </script>

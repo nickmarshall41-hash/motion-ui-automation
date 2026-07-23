@@ -8,5 +8,9 @@ upload_source_maps = true
 [browser]
 binding = "MYBROWSER"
 
+[[kv_namespaces]]
+binding = "SESSION_KV"
+id = "a8ea55d2b7ca4a76bf8b1e2a2d8d9687"
+
 [observability]
 enabled = true

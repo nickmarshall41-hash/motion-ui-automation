@@ -17,12 +17,27 @@ type LocatorTarget = {
     | "label"
     | "placeholder"
     | "testId"
+    | "title"
     | "css";
+
   value?: string;
   role?: string;
   name?: string;
   exact?: boolean;
   nth?: number;
+
+  /**
+   * Restricts this target to a parent container.
+   *
+   * Example:
+   * Find an Add task button only inside the dialog containing Blocked By.
+   */
+  within?: LocatorTarget;
+
+  /**
+   * Further restricts the matched element to one containing this text.
+   */
+  hasText?: string;
 };
 
 type UiStep =
@@ -38,6 +53,20 @@ type UiStep =
     }
   | {
       action: "click";
+      target: LocatorTarget;
+      timeoutMs?: number;
+      button?: "left" | "right" | "middle";
+      force?: boolean;
+      clickCount?: number;
+    }
+  | {
+      action: "hover";
+      target: LocatorTarget;
+      timeoutMs?: number;
+      force?: boolean;
+    }
+  | {
+      action: "blur";
       target: LocatorTarget;
       timeoutMs?: number;
     }
@@ -86,6 +115,12 @@ type UiStep =
   | {
       action: "assertVisible";
       target: LocatorTarget;
+      timeoutMs?: number;
+    }
+  | {
+      action: "assertCount";
+      target: LocatorTarget;
+      count: number;
       timeoutMs?: number;
     }
   | {
@@ -167,6 +202,7 @@ const ARTIFACT_PREFIX =
 const MAX_UI_STEPS = 50;
 const MAX_WAIT_MS = 30_000;
 const DEFAULT_TIMEOUT_MS = 15_000;
+const MAX_LOCATOR_DEPTH = 5;
 
 const AUTOMATION_LOCK_TTL_SECONDS =
   4 * 60;
@@ -177,11 +213,15 @@ const ARTIFACT_TTL_SECONDS =
 const CORS_HEADERS:
   Record<string, string> = {
     "Access-Control-Allow-Origin": "*",
+
     "Access-Control-Allow-Methods":
       "GET, POST, DELETE, OPTIONS",
+
     "Access-Control-Allow-Headers":
       "Authorization, Content-Type, X-Automation-Token",
-    "Access-Control-Max-Age": "86400",
+
+    "Access-Control-Max-Age":
+      "86400",
   };
 
 export default {
@@ -190,18 +230,28 @@ export default {
     env: Env,
   ): Promise<Response> {
     try {
-      if (request.method === "OPTIONS") {
-        return new Response(null, {
-          status: 204,
-          headers: CORS_HEADERS,
-        });
+      if (
+        request.method ===
+        "OPTIONS"
+      ) {
+        return new Response(
+          null,
+          {
+            status: 204,
+            headers: CORS_HEADERS,
+          },
+        );
       }
 
       const requestUrl =
-        new URL(request.url);
+        new URL(
+          request.url,
+        );
 
       const path =
-        normalizePath(requestUrl.pathname);
+        normalizePath(
+          requestUrl.pathname,
+        );
 
       if (
         request.method === "GET" &&
@@ -217,7 +267,9 @@ export default {
         request.method === "GET" &&
         path === "/setup"
       ) {
-        return htmlResponse(setupPage());
+        return htmlResponse(
+          setupPage(),
+        );
       }
 
       if (
@@ -226,13 +278,23 @@ export default {
       ) {
         return jsonResponse({
           ok: true,
+
           service:
             "motion-ui-automation",
-          version: "3.0.0",
+
+          version:
+            "3.1.0",
+
           browserBinding:
-            Boolean(env.MYBROWSER),
+            Boolean(
+              env.MYBROWSER,
+            ),
+
           kvBinding:
-            Boolean(env.SESSION_KV),
+            Boolean(
+              env.SESSION_KV,
+            ),
+
           automationTokenConfigured:
             Boolean(
               env.AUTOMATION_TOKEN,
@@ -241,9 +303,14 @@ export default {
       }
 
       const authorizationError =
-        authorize(request, env);
+        authorize(
+          request,
+          env,
+        );
 
-      if (authorizationError) {
+      if (
+        authorizationError
+      ) {
         return authorizationError;
       }
 
@@ -260,14 +327,18 @@ export default {
         request.method === "GET" &&
         path === "/session/status"
       ) {
-        return getSessionStatus(env);
+        return getSessionStatus(
+          env,
+        );
       }
 
       if (
         request.method === "POST" &&
         path === "/session/login"
       ) {
-        return runInteractiveLogin(env);
+        return runInteractiveLogin(
+          env,
+        );
       }
 
       if (
@@ -292,14 +363,18 @@ export default {
         request.method === "POST" &&
         path === "/session/test"
       ) {
-        return testSavedSession(env);
+        return testSavedSession(
+          env,
+        );
       }
 
       if (
         request.method === "DELETE" &&
         path === "/session"
       ) {
-        return clearSavedSession(env);
+        return clearSavedSession(
+          env,
+        );
       }
 
       if (
@@ -307,7 +382,9 @@ export default {
         path === "/ui/inspect"
       ) {
         const body =
-          await readJson<InspectRequest>(
+          await readJson<
+            InspectRequest
+          >(
             request,
           );
 
@@ -323,7 +400,9 @@ export default {
         path === "/ui/run"
       ) {
         const body =
-          await readJson<RunRequest>(
+          await readJson<
+            RunRequest
+          >(
             request,
           );
 
@@ -352,9 +431,13 @@ export default {
       return jsonResponse(
         {
           ok: false,
-          error: "Unknown route.",
+
+          error:
+            "Unknown route.",
+
           supportedRoutes:
-            capabilities().routes,
+            capabilities()
+              .routes,
         },
         404,
       );
@@ -367,12 +450,14 @@ export default {
       return jsonResponse(
         {
           ok: false,
+
           error:
             "Unhandled Worker error.",
+
           details:
-            error instanceof Error
-              ? error.message
-              : String(error),
+            errorMessage(
+              error,
+            ),
         },
         500,
       );
@@ -383,9 +468,12 @@ export default {
 function capabilities() {
   return {
     ok: true,
+
     service:
       "motion-ui-automation",
-    version: "3.0.0",
+
+    version:
+      "3.1.0",
 
     purpose:
       "Authenticated Motion-only UI inspection and controlled browser automation for features not exposed by the public Motion API.",
@@ -407,6 +495,8 @@ function capabilities() {
     supportedUiSteps: [
       "goto",
       "click",
+      "hover",
+      "blur",
       "fill",
       "clear",
       "press",
@@ -416,6 +506,7 @@ function capabilities() {
       "wait",
       "waitFor",
       "assertVisible",
+      "assertCount",
       "assertText",
       "assertUrl",
       "scroll",
@@ -429,8 +520,24 @@ function capabilities() {
       "label",
       "placeholder",
       "testId",
+      "title",
       "css",
     ],
+
+    clickOptions: [
+      "left",
+      "right",
+      "middle",
+      "force",
+      "clickCount",
+    ],
+
+    locatorScoping: {
+      within: true,
+      hasText: true,
+      maximumDepth:
+        MAX_LOCATOR_DEPTH,
+    },
 
     safety: {
       allowedOrigin:
@@ -453,6 +560,18 @@ function capabilities() {
 
       concurrencyLock:
         true,
+
+      scopedLocators:
+        true,
+
+      rightClickViaClickAction:
+        true,
+
+      hoverControls:
+        true,
+
+      blurToCommitEdits:
+        true,
     },
   };
 }
@@ -469,29 +588,41 @@ async function inspectMotionUi(
     );
 
   if (!lock.ok) {
-    return jsonResponse(lock, 409);
+    return jsonResponse(
+      lock,
+      409,
+    );
   }
 
   let browser:
     Awaited<
-      ReturnType<typeof launch>
+      ReturnType<
+        typeof launch
+      >
     > | null = null;
 
   try {
     const savedState =
-      await requireSavedState(env);
+      await requireSavedState(
+        env,
+      );
 
     const targetUrl =
       validateMotionUrl(
-        input?.url ?? MOTION_URL,
+        input?.url ??
+          MOTION_URL,
       );
 
     browser =
-      await launch(env.MYBROWSER);
+      await launch(
+        env.MYBROWSER,
+      );
 
     const context =
       await browser.newContext({
-        storageState: savedState,
+        storageState:
+          savedState,
+
         viewport: {
           width: 1440,
           height: 1000,
@@ -505,15 +636,21 @@ async function inspectMotionUi(
       DEFAULT_TIMEOUT_MS,
     );
 
-    await page.goto(targetUrl, {
-      waitUntil:
-        "domcontentloaded",
-      timeout: 60_000,
-    });
+    await page.goto(
+      targetUrl,
+      {
+        waitUntil:
+          "domcontentloaded",
+
+        timeout:
+          60_000,
+      },
+    );
 
     await page.waitForTimeout(
       clampInteger(
-        input?.waitMs ?? 2_000,
+        input?.waitMs ??
+          2_000,
         0,
         MAX_WAIT_MS,
       ),
@@ -523,16 +660,22 @@ async function inspectMotionUi(
       page.url(),
     );
 
-    await ensureSignedIn(page);
+    await ensureSignedIn(
+      page,
+    );
 
     const summary =
       await collectPageSummary(
         page,
+
         Boolean(
-          input?.includeVisibleText,
+          input
+            ?.includeVisibleText,
         ),
+
         clampInteger(
-          input?.maxControls ?? 120,
+          input?.maxControls ??
+            120,
           1,
           250,
         ),
@@ -541,7 +684,9 @@ async function inspectMotionUi(
     let artifactId:
       string | null = null;
 
-    if (input?.screenshot) {
+    if (
+      input?.screenshot
+    ) {
       artifactId =
         await saveScreenshot(
           env,
@@ -557,14 +702,18 @@ async function inspectMotionUi(
 
     return jsonResponse({
       ok: true,
+
       summary,
 
       artifact:
         artifactId
           ? {
-              id: artifactId,
+              id:
+                artifactId,
+
               endpoint:
                 `${workerOrigin}/artifacts/${artifactId}`,
+
               expiresInSeconds:
                 ARTIFACT_TTL_SECONDS,
             }
@@ -574,18 +723,26 @@ async function inspectMotionUi(
     return jsonResponse(
       {
         ok: false,
+
         error:
           "Motion UI inspection failed.",
+
         details:
-          errorMessage(error),
+          errorMessage(
+            error,
+          ),
       },
       500,
     );
   } finally {
-    if (browser) {
+    if (
+      browser
+    ) {
       await browser
         .close()
-        .catch(() => undefined);
+        .catch(
+          () => undefined,
+        );
     }
 
     await releaseAutomationLock(
@@ -600,7 +757,9 @@ async function runMotionUi(
   workerOrigin: string,
   input: RunRequest,
 ): Promise<Response> {
-  validateRunRequest(input);
+  validateRunRequest(
+    input,
+  );
 
   const destructiveMatches =
     findDestructiveMatches(
@@ -608,7 +767,8 @@ async function runMotionUi(
     );
 
   const destructive =
-    destructiveMatches.length > 0;
+    destructiveMatches.length >
+    0;
 
   if (
     destructive &&
@@ -627,13 +787,18 @@ async function runMotionUi(
     );
   }
 
-  if (input.dryRun) {
+  if (
+    input.dryRun
+  ) {
     return jsonResponse({
       ok: true,
-      dryRun: true,
+
+      dryRun:
+        true,
 
       operationName:
-        input.operationName ?? null,
+        input.operationName ??
+        null,
 
       destructive,
 
@@ -650,20 +815,27 @@ async function runMotionUi(
   const lock =
     await acquireAutomationLock(
       env,
+
       input.operationName ??
         "ui-run",
     );
 
   if (!lock.ok) {
-    return jsonResponse(lock, 409);
+    return jsonResponse(
+      lock,
+      409,
+    );
   }
 
   let browser:
     Awaited<
-      ReturnType<typeof launch>
+      ReturnType<
+        typeof launch
+      >
     > | null = null;
 
-  let page: any = null;
+  let page:
+    any = null;
 
   let artifactId:
     string | null = null;
@@ -673,7 +845,9 @@ async function runMotionUi(
 
   try {
     const savedState =
-      await requireSavedState(env);
+      await requireSavedState(
+        env,
+      );
 
     const startUrl =
       validateMotionUrl(
@@ -692,7 +866,8 @@ async function runMotionUi(
 
     const context =
       await browser.newContext({
-        storageState: savedState,
+        storageState:
+          savedState,
 
         viewport: {
           width: 1440,
@@ -707,11 +882,16 @@ async function runMotionUi(
       DEFAULT_TIMEOUT_MS,
     );
 
-    await page.goto(startUrl, {
-      waitUntil:
-        "domcontentloaded",
-      timeout: 60_000,
-    });
+    await page.goto(
+      startUrl,
+      {
+        waitUntil:
+          "domcontentloaded",
+
+        timeout:
+          60_000,
+      },
+    );
 
     await page.waitForTimeout(
       2_000,
@@ -721,7 +901,9 @@ async function runMotionUi(
       page.url(),
     );
 
-    await ensureSignedIn(page);
+    await ensureSignedIn(
+      page,
+    );
 
     for (
       let index = 0;
@@ -746,10 +928,14 @@ async function runMotionUi(
 
         stepResults.push({
           index,
+
           action:
             step.action,
+
           ok: true,
+
           result,
+
           currentUrl:
             page.url(),
         });
@@ -759,7 +945,9 @@ async function runMotionUi(
             env,
             page,
             true,
-          ).catch(() => null);
+          ).catch(
+            () => null,
+          );
 
         throw new Error(
           `Step ${index + 1} (${step.action}) failed: ${errorMessage(error)}`,
@@ -768,7 +956,8 @@ async function runMotionUi(
     }
 
     if (
-      input.saveState !== false
+      input.saveState !==
+      false
     ) {
       await persistStorageState(
         env,
@@ -800,7 +989,8 @@ async function runMotionUi(
       ok: true,
 
       operationName:
-        input.operationName ?? null,
+        input.operationName ??
+        null,
 
       destructive,
 
@@ -828,6 +1018,9 @@ async function runMotionUi(
 
               endpoint:
                 `${workerOrigin}/artifacts/${artifactId}`,
+
+              expiresInSeconds:
+                ARTIFACT_TTL_SECONDS,
             }
           : null,
     });
@@ -841,7 +1034,9 @@ async function runMotionUi(
           env,
           page,
           true,
-        ).catch(() => null);
+        ).catch(
+          () => null,
+        );
     }
 
     return jsonResponse(
@@ -852,7 +1047,9 @@ async function runMotionUi(
           "Motion UI automation failed.",
 
         details:
-          errorMessage(error),
+          errorMessage(
+            error,
+          ),
 
         completedSteps:
           stepResults,
@@ -874,10 +1071,14 @@ async function runMotionUi(
       500,
     );
   } finally {
-    if (browser) {
+    if (
+      browser
+    ) {
       await browser
         .close()
-        .catch(() => undefined);
+        .catch(
+          () => undefined,
+        );
     }
 
     await releaseAutomationLock(
@@ -892,26 +1093,31 @@ async function executeUiStep(
   page: any,
   step: UiStep,
 ): Promise<unknown> {
-  switch (step.action) {
+  switch (
+    step.action
+  ) {
     case "goto": {
       const url =
         validateMotionUrl(
           step.url,
         );
 
-      await page.goto(url, {
-        waitUntil:
-          step.waitUntil ??
-          "domcontentloaded",
+      await page.goto(
+        url,
+        {
+          waitUntil:
+            step.waitUntil ??
+            "domcontentloaded",
 
-        timeout:
-          clampInteger(
-            step.timeoutMs ??
-              60_000,
-            1_000,
-            90_000,
-          ),
-      });
+          timeout:
+            clampInteger(
+              step.timeoutMs ??
+                60_000,
+              1_000,
+              90_000,
+            ),
+        },
+      );
 
       await page.waitForTimeout(
         1_000,
@@ -935,7 +1141,103 @@ async function executeUiStep(
           step.target,
         );
 
+      const timeout =
+        clampInteger(
+          step.timeoutMs ??
+            DEFAULT_TIMEOUT_MS,
+          500,
+          60_000,
+        );
+
+      const clickCount =
+        clampInteger(
+          step.clickCount ??
+            1,
+          1,
+          2,
+        );
+
       await locator.click({
+        timeout,
+
+        button:
+          step.button ??
+          "left",
+
+        force:
+          step.force ??
+          false,
+
+        clickCount,
+      });
+
+      await page.waitForTimeout(
+        400,
+      );
+
+      return {
+        target:
+          describeTarget(
+            step.target,
+          ),
+
+        button:
+          step.button ??
+          "left",
+
+        force:
+          step.force ??
+          false,
+
+        clickCount,
+      };
+    }
+
+    case "hover": {
+      const locator =
+        resolveLocator(
+          page,
+          step.target,
+        );
+
+      await locator.hover({
+        timeout:
+          clampInteger(
+            step.timeoutMs ??
+              DEFAULT_TIMEOUT_MS,
+            500,
+            60_000,
+          ),
+
+        force:
+          step.force ??
+          false,
+      });
+
+      await page.waitForTimeout(
+        350,
+      );
+
+      return {
+        target:
+          describeTarget(
+            step.target,
+          ),
+
+        force:
+          step.force ??
+          false,
+      };
+    }
+
+    case "blur": {
+      const locator =
+        resolveLocator(
+          page,
+          step.target,
+        );
+
+      await locator.blur({
         timeout:
           clampInteger(
             step.timeoutMs ??
@@ -946,7 +1248,7 @@ async function executeUiStep(
       });
 
       await page.waitForTimeout(
-        400,
+        350,
       );
 
       return describeTarget(
@@ -1016,13 +1318,17 @@ async function executeUiStep(
           60_000,
         );
 
-      if (step.target) {
+      if (
+        step.target
+      ) {
         await resolveLocator(
           page,
           step.target,
         ).press(
           step.key,
-          { timeout },
+          {
+            timeout,
+          },
         );
       } else {
         await page.keyboard.press(
@@ -1088,7 +1394,8 @@ async function executeUiStep(
         );
 
       if (
-        step.action === "check"
+        step.action ===
+        "check"
       ) {
         await locator.check({
           timeout,
@@ -1117,7 +1424,8 @@ async function executeUiStep(
       );
 
       return {
-        waitedMs: ms,
+        waitedMs:
+          ms,
       };
     }
 
@@ -1156,7 +1464,8 @@ async function executeUiStep(
         page,
         step.target,
       ).waitFor({
-        state: "visible",
+        state:
+          "visible",
 
         timeout:
           clampInteger(
@@ -1170,6 +1479,69 @@ async function executeUiStep(
       return describeTarget(
         step.target,
       );
+    }
+
+    case "assertCount": {
+      const locator =
+        resolveLocator(
+          page,
+          step.target,
+        );
+
+      const expected =
+        clampInteger(
+          step.count,
+          0,
+          10_000,
+        );
+
+      const timeout =
+        clampInteger(
+          step.timeoutMs ??
+            DEFAULT_TIMEOUT_MS,
+          500,
+          60_000,
+        );
+
+      const deadline =
+        Date.now() +
+        timeout;
+
+      let actual =
+        await locator.count();
+
+      while (
+        actual !==
+          expected &&
+        Date.now() <
+          deadline
+      ) {
+        await page.waitForTimeout(
+          200,
+        );
+
+        actual =
+          await locator.count();
+      }
+
+      if (
+        actual !==
+        expected
+      ) {
+        throw new Error(
+          `Count assertion failed. Expected ${expected}, received ${actual}.`,
+        );
+      }
+
+      return {
+        target:
+          describeTarget(
+            step.target,
+          ),
+
+        expected,
+        actual,
+      };
     }
 
     case "assertText": {
@@ -1196,7 +1568,8 @@ async function executeUiStep(
 
       const matches =
         step.exact
-          ? actual === expected
+          ? actual ===
+            expected
           : actual.includes(
               expected,
             );
@@ -1208,7 +1581,8 @@ async function executeUiStep(
       }
 
       return {
-        matched: true,
+        matched:
+          true,
 
         target:
           describeTarget(
@@ -1232,7 +1606,9 @@ async function executeUiStep(
         );
       }
 
-      if (step.matches) {
+      if (
+        step.matches
+      ) {
         const regex =
           new RegExp(
             step.matches,
@@ -1257,7 +1633,8 @@ async function executeUiStep(
     case "scroll": {
       const amount =
         clampInteger(
-          step.amount ?? 700,
+          step.amount ??
+            700,
           1,
           5_000,
         );
@@ -1270,7 +1647,9 @@ async function executeUiStep(
           ? amount
           : -amount;
 
-      if (step.target) {
+      if (
+        step.target
+      ) {
         await resolveLocator(
           page,
           step.target,
@@ -1283,10 +1662,14 @@ async function executeUiStep(
               number,
           ) => {
             element.scrollBy({
-              top: delta,
-              behavior: "auto",
+              top:
+                delta,
+
+              behavior:
+                "auto",
             });
           },
+
           signedAmount,
         );
       } else {
@@ -1351,6 +1734,7 @@ async function executeUiStep(
         await saveScreenshot(
           env,
           page,
+
           step.fullPage ??
             true,
         );
@@ -1374,33 +1758,65 @@ async function executeUiStep(
 function resolveLocator(
   page: any,
   target: LocatorTarget,
+  depth = 0,
 ): any {
   validateLocatorTarget(
     target,
+    depth,
   );
 
-  let locator: any;
+  if (
+    depth >
+    MAX_LOCATOR_DEPTH
+  ) {
+    throw new Error(
+      `Locator nesting exceeds the maximum depth of ${MAX_LOCATOR_DEPTH}.`,
+    );
+  }
 
-  switch (target.by) {
-    case "role":
+  const root =
+    target.within
+      ? resolveLocator(
+          page,
+          target.within,
+          depth + 1,
+        )
+      : page;
+
+  let locator:
+    any;
+
+  switch (
+    target.by
+  ) {
+    case "role": {
+      const roleName =
+        target.name ??
+        target.value;
+
       locator =
-        page.getByRole(
-          target.role,
-          {
-            name:
-              target.name ??
-              target.value,
+        roleName
+          ? root.getByRole(
+              target.role as any,
+              {
+                name:
+                  roleName,
 
-            exact:
-              target.exact ??
-              false,
-          },
-        );
+                exact:
+                  target.exact ??
+                  false,
+              },
+            )
+          : root.getByRole(
+              target.role as any,
+            );
+
       break;
+    }
 
     case "text":
       locator =
-        page.getByText(
+        root.getByText(
           target.value ??
             "",
           {
@@ -1413,7 +1829,7 @@ function resolveLocator(
 
     case "label":
       locator =
-        page.getByLabel(
+        root.getByLabel(
           target.value ??
             "",
           {
@@ -1426,7 +1842,7 @@ function resolveLocator(
 
     case "placeholder":
       locator =
-        page.getByPlaceholder(
+        root.getByPlaceholder(
           target.value ??
             "",
           {
@@ -1439,15 +1855,28 @@ function resolveLocator(
 
     case "testId":
       locator =
-        page.getByTestId(
+        root.getByTestId(
           target.value ??
             "",
         );
       break;
 
+    case "title":
+      locator =
+        root.getByTitle(
+          target.value ??
+            "",
+          {
+            exact:
+              target.exact ??
+              false,
+          },
+        );
+      break;
+
     case "css":
       locator =
-        page.locator(
+        root.locator(
           target.value ??
             "",
         );
@@ -1460,13 +1889,23 @@ function resolveLocator(
   }
 
   if (
+    target.hasText
+  ) {
+    locator =
+      locator.filter({
+        hasText:
+          target.hasText,
+      });
+  }
+
+  if (
     Number.isInteger(
       target.nth,
     )
   ) {
     locator =
       locator.nth(
-        target.nth,
+        target.nth as number,
       );
   }
 
@@ -1491,8 +1930,13 @@ async function collectPageSummary(
       .map(
         normalizeWhitespace,
       )
-      .filter(Boolean)
-      .slice(0, 60);
+      .filter(
+        Boolean,
+      )
+      .slice(
+        0,
+        60,
+      );
 
   const dialogs =
     (
@@ -1505,10 +1949,18 @@ async function collectPageSummary(
       .map(
         normalizeWhitespace,
       )
-      .filter(Boolean)
-      .slice(0, 20)
+      .filter(
+        Boolean,
+      )
+      .slice(
+        0,
+        20,
+      )
       .map(
-        (text: string) =>
+        (
+          text:
+            string,
+        ) =>
           text.slice(
             0,
             2_000,
@@ -1518,7 +1970,20 @@ async function collectPageSummary(
   const controls =
     await page
       .locator(
-        'button, a[href], input, textarea, select, [role="button"], [role="menuitem"], [role="option"], [role="checkbox"], [role="radio"], [contenteditable="true"]',
+        [
+          "button",
+          "a[href]",
+          "input",
+          "textarea",
+          "select",
+          '[role="button"]',
+          '[role="menuitem"]',
+          '[role="option"]',
+          '[role="checkbox"]',
+          '[role="radio"]',
+          '[contenteditable="true"]',
+          "[title]",
+        ].join(", "),
       )
       .evaluateAll(
         (
@@ -1551,7 +2016,8 @@ async function collectPageSummary(
                 element,
               ) => {
                 const html =
-                  element as HTMLElement;
+                  element as
+                    HTMLElement;
 
                 const rect =
                   html
@@ -1564,8 +2030,10 @@ async function collectPageSummary(
                     );
 
                 return (
-                  rect.width > 0 &&
-                  rect.height > 0 &&
+                  rect.width >
+                    0 &&
+                  rect.height >
+                    0 &&
                   style.visibility !==
                     "hidden" &&
                   style.display !==
@@ -1583,19 +2051,24 @@ async function collectPageSummary(
                 index,
               ) => {
                 const html =
-                  element as HTMLElement;
+                  element as
+                    HTMLElement;
 
                 const input =
-                  element as HTMLInputElement;
+                  element as
+                    HTMLInputElement;
 
                 const anchor =
-                  element as HTMLAnchorElement;
+                  element as
+                    HTMLAnchorElement;
 
                 const associatedLabel =
-                  "labels" in input &&
+                  "labels" in
+                    input &&
                   input.labels &&
                   input.labels
-                    .length > 0
+                    .length >
+                    0
                     ? normalize(
                         input
                           .labels[0]
@@ -1609,21 +2082,18 @@ async function collectPageSummary(
                     .toLowerCase();
 
                 const role =
-                  element
-                    .getAttribute(
-                      "role",
-                    ) ||
+                  element.getAttribute(
+                    "role",
+                  ) ||
                   (
                     tag ===
                     "button"
-                  )
-                    ? "button"
-                    : (
-                        tag ===
-                        "a"
-                      )
-                      ? "link"
-                      : "";
+                      ? "button"
+                      : tag ===
+                          "a"
+                        ? "link"
+                        : ""
+                  );
 
                 const text =
                   normalize(
@@ -1680,6 +2150,56 @@ async function collectPageSummary(
                       ),
                   );
 
+                const id =
+                  normalize(
+                    element
+                      .getAttribute(
+                        "id",
+                      ),
+                  );
+
+                const ariaHasPopup =
+                  normalize(
+                    element
+                      .getAttribute(
+                        "aria-haspopup",
+                      ),
+                  );
+
+                const ariaExpanded =
+                  normalize(
+                    element
+                      .getAttribute(
+                        "aria-expanded",
+                      ),
+                  );
+
+                const ariaControls =
+                  normalize(
+                    element
+                      .getAttribute(
+                        "aria-controls",
+                      ),
+                  );
+
+                const dataState =
+                  normalize(
+                    element
+                      .getAttribute(
+                        "data-state",
+                      ),
+                  );
+
+                const parentText =
+                  normalize(
+                    element
+                      .parentElement
+                      ?.textContent,
+                  ).slice(
+                    0,
+                    500,
+                  );
+
                 const suggestions:
                   unknown[] = [];
 
@@ -1691,15 +2211,20 @@ async function collectPageSummary(
                   )
                 ) {
                   suggestions.push({
-                    by: "role",
+                    by:
+                      "role",
+
                     role,
+
                     name:
                       ariaLabel ||
                       text.slice(
                         0,
                         160,
                       ),
-                    exact: true,
+
+                    exact:
+                      true,
                   });
                 }
 
@@ -1707,10 +2232,14 @@ async function collectPageSummary(
                   associatedLabel
                 ) {
                   suggestions.push({
-                    by: "label",
+                    by:
+                      "label",
+
                     value:
                       associatedLabel,
-                    exact: true,
+
+                    exact:
+                      true,
                   });
                 }
 
@@ -1720,17 +2249,51 @@ async function collectPageSummary(
                   suggestions.push({
                     by:
                       "placeholder",
+
                     value:
                       placeholder,
-                    exact: true,
+
+                    exact:
+                      true,
                   });
                 }
 
-                if (testId) {
+                if (
+                  testId
+                ) {
                   suggestions.push({
-                    by: "testId",
+                    by:
+                      "testId",
+
                     value:
                       testId,
+                  });
+                }
+
+                if (
+                  title
+                ) {
+                  suggestions.push({
+                    by:
+                      "title",
+
+                    value:
+                      title,
+
+                    exact:
+                      true,
+                  });
+                }
+
+                if (
+                  id
+                ) {
+                  suggestions.push({
+                    by:
+                      "css",
+
+                    value:
+                      `#${CSS.escape(id)}`,
                   });
                 }
 
@@ -1740,9 +2303,14 @@ async function collectPageSummary(
                     180
                 ) {
                   suggestions.push({
-                    by: "text",
-                    value: text,
-                    exact: true,
+                    by:
+                      "text",
+
+                    value:
+                      text,
+
+                    exact:
+                      true,
                   });
                 }
 
@@ -1790,6 +2358,30 @@ async function collectPageSummary(
                     name ||
                     null,
 
+                  id:
+                    id ||
+                    null,
+
+                  ariaHasPopup:
+                    ariaHasPopup ||
+                    null,
+
+                  ariaExpanded:
+                    ariaExpanded ||
+                    null,
+
+                  ariaControls:
+                    ariaControls ||
+                    null,
+
+                  dataState:
+                    dataState ||
+                    null,
+
+                  parentText:
+                    parentText ||
+                    null,
+
                   href:
                     tag ===
                       "a" &&
@@ -1798,12 +2390,14 @@ async function collectPageSummary(
                       : null,
 
                   disabled:
-                    element.hasAttribute(
-                      "disabled",
-                    ) ||
-                    element.getAttribute(
-                      "aria-disabled",
-                    ) ===
+                    element
+                      .hasAttribute(
+                        "disabled",
+                      ) ||
+                    element
+                      .getAttribute(
+                        "aria-disabled",
+                      ) ===
                       "true",
 
                   checked:
@@ -1831,12 +2425,13 @@ async function collectPageSummary(
                   suggestedTargets:
                     suggestions.slice(
                       0,
-                      5,
+                      7,
                     ),
                 };
               },
             );
         },
+
         maxControls,
       );
 
@@ -1844,7 +2439,9 @@ async function collectPageSummary(
     includeVisibleText
       ? normalizeWhitespace(
           await page
-            .locator("body")
+            .locator(
+              "body",
+            )
             .innerText(),
         ).slice(
           0,
@@ -1876,7 +2473,9 @@ async function runInteractiveLogin(
       ACTIVE_ATTEMPT_KEY,
     );
 
-  if (existingAttempt) {
+  if (
+    existingAttempt
+  ) {
     return jsonResponse(
       {
         ok: false,
@@ -1945,8 +2544,11 @@ async function runInteractiveLogin(
           savedState,
 
         viewport: {
-          width: 1440,
-          height: 1000,
+          width:
+            1440,
+
+          height:
+            1000,
         },
       });
 
@@ -1992,10 +2594,15 @@ async function runInteractiveLogin(
           ),
         ]);
 
-      if (cancelled) {
+      if (
+        cancelled
+      ) {
         return jsonResponse({
           ok: false,
-          cancelled: true,
+
+          cancelled:
+            true,
+
           sessionId,
 
           message:
@@ -2003,11 +2610,12 @@ async function runInteractiveLogin(
         });
       }
 
-      if (confirmed) {
-        await page
-          .waitForTimeout(
-            2_000,
-          );
+      if (
+        confirmed
+      ) {
+        await page.waitForTimeout(
+          2_000,
+        );
 
         await persistStorageState(
           env,
@@ -2016,7 +2624,10 @@ async function runInteractiveLogin(
 
         return jsonResponse({
           ok: true,
-          saved: true,
+
+          saved:
+            true,
+
           attemptId,
           sessionId,
 
@@ -2033,7 +2644,9 @@ async function runInteractiveLogin(
         });
       }
 
-      await sleep(1_000);
+      await sleep(
+        1_000,
+      );
     }
 
     return jsonResponse(
@@ -2103,7 +2716,10 @@ async function confirmInteractiveLogin(
 
   return jsonResponse({
     ok: true,
-    confirmed: true,
+
+    confirmed:
+      true,
+
     attemptId,
 
     message:
@@ -2122,7 +2738,9 @@ async function cancelInteractiveLogin(
   if (!attemptId) {
     return jsonResponse({
       ok: true,
-      cancelled: false,
+
+      cancelled:
+        false,
 
       message:
         "There is no active login attempt.",
@@ -2140,7 +2758,10 @@ async function cancelInteractiveLogin(
 
   return jsonResponse({
     ok: true,
-    cancelled: true,
+
+    cancelled:
+      true,
+
     attemptId,
   });
 }
@@ -2155,12 +2776,17 @@ async function testSavedSession(
     );
 
   if (!lock.ok) {
-    return jsonResponse(lock, 409);
+    return jsonResponse(
+      lock,
+      409,
+    );
   }
 
   let browser:
     Awaited<
-      ReturnType<typeof launch>
+      ReturnType<
+        typeof launch
+      >
     > | null = null;
 
   try {
@@ -2180,8 +2806,11 @@ async function testSavedSession(
           savedState,
 
         viewport: {
-          width: 1440,
-          height: 1000,
+          width:
+            1440,
+
+          height:
+            1000,
         },
       });
 
@@ -2210,7 +2839,9 @@ async function testSavedSession(
         )
       );
 
-    if (likelySignedIn) {
+    if (
+      likelySignedIn
+    ) {
       await persistStorageState(
         env,
         context,
@@ -2236,10 +2867,14 @@ async function testSavedSession(
           : "Motion appears to require authentication. Run the interactive login again.",
     });
   } finally {
-    if (browser) {
+    if (
+      browser
+    ) {
       await browser
         .close()
-        .catch(() => undefined);
+        .catch(
+          () => undefined,
+        );
     }
 
     await releaseAutomationLock(
@@ -2271,22 +2906,37 @@ async function getSessionStatus(
       ),
     ]);
 
+  let parsedLock:
+    unknown = null;
+
+  if (
+    activeLock
+  ) {
+    try {
+      parsedLock =
+        JSON.parse(
+          activeLock,
+        );
+    } catch {
+      parsedLock =
+        activeLock;
+    }
+  }
+
   return jsonResponse({
     ok: true,
 
     signedInStateSaved:
-      Boolean(savedState),
+      Boolean(
+        savedState,
+      ),
 
     activeLoginAttemptId:
       activeAttemptId ??
       null,
 
     automationLock:
-      activeLock
-        ? JSON.parse(
-            activeLock,
-          )
-        : null,
+      parsedLock,
   });
 }
 
@@ -2305,7 +2955,9 @@ async function clearSavedSession(
     "motion:active-session",
   ];
 
-  if (attemptId) {
+  if (
+    attemptId
+  ) {
     keys.push(
       `${CONFIRM_PREFIX}${attemptId}`,
       `${CANCEL_PREFIX}${attemptId}`,
@@ -2314,7 +2966,9 @@ async function clearSavedSession(
 
   await Promise.all(
     keys.map(
-      (key) =>
+      (
+        key,
+      ) =>
         env.SESSION_KV.delete(
           key,
         ),
@@ -2323,7 +2977,9 @@ async function clearSavedSession(
 
   return jsonResponse({
     ok: true,
-    cleared: true,
+
+    cleared:
+      true,
   });
 }
 
@@ -2349,23 +3005,27 @@ async function getArtifact(
     );
   }
 
-  return new Response(stored, {
-    status: 200,
+  return new Response(
+    stored,
+    {
+      status:
+        200,
 
-    headers: {
-      "Content-Type":
-        "image/png",
+      headers: {
+        "Content-Type":
+          "image/png",
 
-      "Content-Disposition":
-        `inline; filename="${artifactId}.png"`,
+        "Content-Disposition":
+          `inline; filename="${artifactId}.png"`,
 
-      "Cache-Control":
-        "private, no-store",
+        "Cache-Control":
+          "private, no-store",
 
-      "X-Content-Type-Options":
-        "nosniff",
+        "X-Content-Type-Options":
+          "nosniff",
+      },
     },
-  });
+  );
 }
 
 async function saveScreenshot(
@@ -2379,7 +3039,9 @@ async function saveScreenshot(
   const bytes =
     await page.screenshot({
       fullPage,
-      type: "png",
+
+      type:
+        "png",
     });
 
   await env.SESSION_KV.put(
@@ -2414,7 +3076,9 @@ async function acquireAutomationLock(
       "json",
     );
 
-  if (existing) {
+  if (
+    existing
+  ) {
     return {
       ok: false,
 
@@ -2487,7 +3151,9 @@ async function requireSavedState(
       STORAGE_STATE_KEY,
     );
 
-  if (!savedStateJson) {
+  if (
+    !savedStateJson
+  ) {
     throw new Error(
       "No saved Motion login exists. Use the setup page to complete the interactive login first.",
     );
@@ -2507,7 +3173,8 @@ async function persistStorageState(
 ): Promise<void> {
   const storageState =
     await context.storageState({
-      indexedDB: true,
+      indexedDB:
+        true,
     });
 
   await env.SESSION_KV.put(
@@ -2553,7 +3220,8 @@ async function pageLooksLoggedOut(
       .getByText(
         "Welcome back!",
         {
-          exact: false,
+          exact:
+            false,
         },
       )
       .isVisible()
@@ -2577,7 +3245,8 @@ function validateRunRequest(
 ): void {
   if (
     !input ||
-    typeof input !== "object"
+    typeof input !==
+      "object"
   ) {
     throw new Error(
       "The request body must be a JSON object.",
@@ -2595,7 +3264,8 @@ function validateRunRequest(
   }
 
   if (
-    input.steps.length < 1
+    input.steps.length <
+    1
   ) {
     throw new Error(
       "At least one UI step is required.",
@@ -2630,7 +3300,8 @@ function validateRunRequest(
     }
 
     if (
-      "target" in step &&
+      "target" in
+        step &&
       step.target
     ) {
       validateLocatorTarget(
@@ -2638,9 +3309,47 @@ function validateRunRequest(
           LocatorTarget,
       );
     }
+
+    if (
+      step.action ===
+        "click" &&
+      step.clickCount !==
+        undefined &&
+      (
+        !Number.isInteger(
+          step.clickCount,
+        ) ||
+        step.clickCount <
+          1 ||
+        step.clickCount >
+          2
+      )
+    ) {
+      throw new Error(
+        "clickCount must be either 1 or 2.",
+      );
+    }
+
+    if (
+      step.action ===
+        "assertCount" &&
+      (
+        !Number.isInteger(
+          step.count,
+        ) ||
+        step.count <
+          0
+      )
+    ) {
+      throw new Error(
+        "assertCount requires a non-negative integer count.",
+      );
+    }
   }
 
-  if (input.startUrl) {
+  if (
+    input.startUrl
+  ) {
     validateMotionUrl(
       input.startUrl,
     );
@@ -2649,6 +3358,7 @@ function validateRunRequest(
 
 function validateLocatorTarget(
   target: LocatorTarget,
+  depth = 0,
 ): void {
   if (
     !target ||
@@ -2660,6 +3370,15 @@ function validateLocatorTarget(
     );
   }
 
+  if (
+    depth >
+    MAX_LOCATOR_DEPTH
+  ) {
+    throw new Error(
+      `Locator nesting exceeds the maximum depth of ${MAX_LOCATOR_DEPTH}.`,
+    );
+  }
+
   const supported =
     new Set([
       "role",
@@ -2667,6 +3386,7 @@ function validateLocatorTarget(
       "label",
       "placeholder",
       "testId",
+      "title",
       "css",
     ]);
 
@@ -2684,18 +3404,11 @@ function validateLocatorTarget(
     target.by ===
     "role"
   ) {
-    if (!target.role) {
-      throw new Error(
-        'A role locator requires "role".',
-      );
-    }
-
     if (
-      !target.name &&
-      !target.value
+      !target.role
     ) {
       throw new Error(
-        'A role locator requires "name" or "value".',
+        'A role locator requires "role".',
       );
     }
   } else if (
@@ -2713,11 +3426,35 @@ function validateLocatorTarget(
       !Number.isInteger(
         target.nth,
       ) ||
-      target.nth < 0
+      target.nth <
+        0
     )
   ) {
     throw new Error(
       "target.nth must be a non-negative integer.",
+    );
+  }
+
+  if (
+    target.hasText !==
+      undefined &&
+    (
+      typeof target.hasText !==
+        "string" ||
+      !target.hasText.trim()
+    )
+  ) {
+    throw new Error(
+      "target.hasText must be a non-empty string.",
+    );
+  }
+
+  if (
+    target.within
+  ) {
+    validateLocatorTarget(
+      target.within,
+      depth + 1,
     );
   }
 }
@@ -2725,7 +3462,8 @@ function validateLocatorTarget(
 function validateMotionUrl(
   value: string,
 ): string {
-  let url: URL;
+  let url:
+    URL;
 
   try {
     url =
@@ -2755,7 +3493,9 @@ function assertPageStayedInMotion(
   value: string,
 ): void {
   const url =
-    new URL(value);
+    new URL(
+      value,
+    );
 
   if (
     url.origin !==
@@ -2771,7 +3511,7 @@ function findDestructiveMatches(
   steps: UiStep[],
 ): string[] {
   const pattern =
-    /\b(delete|remove|archive|trash|disconnect|revoke|clear|cancel project|close project|delete label|remove label|remove blocker|unblock)\b/i;
+    /\b(delete|remove|archive|trash|disconnect|revoke|clear|cancel project|close project|delete project|delete label|remove label|remove blocker|unblock)\b/i;
 
   const matches:
     string[] = [];
@@ -2788,17 +3528,19 @@ function findDestructiveMatches(
 
           target:
             "target" in
-            step
+              step
               ? step.target
               : null,
 
           text:
-            "text" in step
+            "text" in
+              step
               ? step.text
               : null,
 
           url:
-            "url" in step
+            "url" in
+              step
               ? step.url
               : null,
         });
@@ -2809,7 +3551,7 @@ function findDestructiveMatches(
         )
       ) {
         matches.push(
-          `step ${index + 1}: ${searchable.slice(0, 300)}`,
+          `step ${index + 1}: ${searchable.slice(0, 500)}`,
         );
       }
     },
@@ -2822,7 +3564,9 @@ function sanitizeStepsForOutput(
   steps: UiStep[],
 ): unknown[] {
   return steps.map(
-    (step) => {
+    (
+      step,
+    ) => {
       if (
         step.action ===
         "fill"
@@ -2866,6 +3610,17 @@ function describeTarget(
     nth:
       target.nth ??
       null,
+
+    hasText:
+      target.hasText ??
+      null,
+
+    within:
+      target.within
+        ? describeTarget(
+            target.within,
+          )
+        : null,
   };
 }
 
@@ -2904,7 +3659,9 @@ function authorize(
         "bearer ",
       )
       ? authorization
-          .slice(7)
+          .slice(
+            7,
+          )
           .trim()
       : alternateToken
           ?.trim();
@@ -2917,6 +3674,7 @@ function authorize(
     return jsonResponse(
       {
         ok: false,
+
         error:
           "Unauthorized.",
       },
@@ -2927,13 +3685,16 @@ function authorize(
   return null;
 }
 
-async function readJson<T>(
+async function readJson<
+  T
+>(
   request: Request,
 ): Promise<T> {
   const contentType =
     request.headers.get(
       "Content-Type",
-    ) ?? "";
+    ) ??
+    "";
 
   if (
     !contentType
@@ -2960,7 +3721,9 @@ async function readJson<T>(
 
 async function safePageTitle(
   page: any,
-): Promise<string | null> {
+): Promise<
+  string | null
+> {
   try {
     return await page.title();
   } catch {
@@ -2994,7 +3757,9 @@ function clampInteger(
 
   return Math.min(
     Math.max(
-      Math.trunc(value),
+      Math.trunc(
+        value,
+      ),
       minimum,
     ),
     maximum,
@@ -3007,14 +3772,18 @@ function errorMessage(
   return error instanceof
     Error
     ? error.message
-    : String(error);
+    : String(
+        error,
+      );
 }
 
 function sleep(
   milliseconds: number,
 ): Promise<void> {
   return new Promise(
-    (resolve) =>
+    (
+      resolve,
+    ) =>
       setTimeout(
         resolve,
         milliseconds,
@@ -3027,13 +3796,16 @@ function normalizePath(
 ): string {
   if (
     !pathname ||
-    pathname === "/"
+    pathname ===
+      "/"
   ) {
     return "/";
   }
 
   return pathname
-    .endsWith("/")
+    .endsWith(
+      "/",
+    )
     ? pathname.slice(
         0,
         -1,
@@ -3076,7 +3848,8 @@ function htmlResponse(
   return new Response(
     html,
     {
-      status: 200,
+      status:
+        200,
 
       headers: {
         "Content-Type":
